@@ -1,5 +1,5 @@
 #### This repo is made for research purposes only.
-### Local environment setup to run open-sourced LLMs (in this case KazLLM-1.0-8B) on macOS (Apple Silicon CPU)
+### Local environment setup to run open-sourced LLMs (in this case KazLLM-1.0-8B) on macOS (Apple Silicon CPU) with token-by-token generation
 
 ### After cloning the repo
 ```
