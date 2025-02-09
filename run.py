@@ -1,80 +1,45 @@
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 import logging
+import time
 
-SYSTEM_PROMPT = "You are a helpful assistant. Answer user queries."
-
-def nucleus_sampling(logits, top_p=0.9, temperature=1.0):
-    logits = logits / temperature
-
-    sorted_logits, sorted_indices = torch.sort(logits, descending=True)
-    
-    probabilities = torch.softmax(sorted_logits, dim=-1)
-    
-    cumulative_probs = torch.cumsum(probabilities, dim=-1)
-    
-    sorted_indices_to_remove = cumulative_probs > top_p
-    
-    sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
-    sorted_indices_to_remove[..., 0] = 0
-
-    sorted_logits[sorted_indices_to_remove] = -float('Inf')
-    
-    filtered_probs = torch.softmax(sorted_logits, dim=-1)
-    
-    next_token = torch.multinomial(filtered_probs, num_samples=1)
-
-    next_token_id = sorted_indices[next_token]
-    return next_token_id
-
-def generate_token_by_token(model, tokenizer, input_ids, max_new_tokens=50, temperature=0.7, top_p=0.9):
-    generated_ids = input_ids.clone()
-    
-    with torch.no_grad():
-        outputs = model(input_ids, use_cache=True)
-    logits = outputs.logits
-    past_key_values = outputs.past_key_values
-
-    for i in range(max_new_tokens):
-        next_token_logits = logits[0, -1, :]
-
-        next_token_id = nucleus_sampling(next_token_logits, top_p=top_p, temperature=temperature)
-        
-        token_str = tokenizer.decode(next_token_id).strip()
-        logging.info(f"Step {i+1}: Generated token id {next_token_id.item()} | Token: '{token_str}'")
-        
-        next_token_id = next_token_id.unsqueeze(0)
-        generated_ids = torch.cat((generated_ids, next_token_id), dim=1)
-        
-        if next_token_id.item() == tokenizer.eos_token_id:
-            logging.info("EOS token generated, stopping generation.")
-            break
-
-        with torch.no_grad():
-            outputs = model(next_token_id, use_cache=True, past_key_values=past_key_values)
-        logits = outputs.logits
-        past_key_values = outputs.past_key_values
-
-    return generated_ids
+# System prompt to instruct the LLM.
+SYSTEM_PROMPT = "You are a helpful assistant."
 
 def main():
-    logging.basicConfig(level=logging.INFO,
-                        format='%(asctime)s - %(levelname)s - %(message)s')
+    # Set up logging to include timestamps.
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(message)s'
+    )
+
+    # Model identifier on Hugging Face Hub.
     model_name = "issai/LLama-3.1-KazLLM-1.0-8B"
 
+    # Determine the device: use Apple Silicon's MPS if available; otherwise, fallback to CPU.
     device = "mps" if torch.backends.mps.is_available() else "cpu"
     logging.info(f"Using device: {device}")
 
+    # Load the tokenizer.
     tokenizer = AutoTokenizer.from_pretrained(model_name)
 
+    # Ensure that the pad token is set; if not, set it to the eos token.
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token_id = tokenizer.eos_token_id
+
+    # Choose the data type: use half precision if on MPS to save memory.
     torch_dtype = torch.float16 if device == "mps" else torch.float32
 
+    # Load the model with automatic device mapping.
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
         device_map="auto",
         torch_dtype=torch_dtype
     )
+    # Do not call model.to(device) as device_map already places modules appropriately.
 
+    # Optionally compile the model for improved performance (requires PyTorch 2.0+).
+    # Skip compiling if using MPS, as torch.compile with the 'inductor' backend does not support MPS.
     if hasattr(torch, "compile"):
         if device != "mps":
             logging.info("Compiling the model for optimized performance...")
@@ -84,29 +49,39 @@ def main():
 
     print("Model and tokenizer loaded successfully.\n")
 
+    # Interactive loop for generating text.
     while True:
         user_input = input("User:\n")
         if user_input.lower() in ["exit", "quit", "q"]:
             print("Exited.")
             break
 
+        # Combine the system prompt with the user input.
         full_prompt = f"{SYSTEM_PROMPT}\nUser: {user_input}\nAssistant:"
-        logging.info("Starting token-by-token generation with system prompt...")
-        
-        inputs = tokenizer(full_prompt, return_tensors="pt").to(device)
+        logging.info("Starting generation...")
 
+        # Tokenize the prompt and ensure the attention mask is returned.
+        inputs = tokenizer(full_prompt, return_tensors="pt", padding=True).to(device)
+
+        # Start timing the generation.
+        start_time = time.time()
         with torch.no_grad():
-            generated_ids = generate_token_by_token(
-                model,
-                tokenizer,
+            generated_ids = model.generate(
                 inputs["input_ids"],
+                attention_mask=inputs["attention_mask"],
                 max_new_tokens=50,
+                do_sample=True,
                 temperature=0.7,
-                top_p=0.9
+                top_p=0.9,
+                pad_token_id=tokenizer.eos_token_id
             )
+        end_time = time.time()
+        elapsed_time = end_time - start_time
 
+        logging.info(f"Generation completed in {elapsed_time:.2f} seconds.")
+
+        # Decode the generated sequence.
         generated_text = tokenizer.decode(generated_ids[0], skip_special_tokens=True)
-        logging.info("Token-by-token generation completed.")
         print("\nGenerated Text:\n", generated_text, "\n")
 
 main()
